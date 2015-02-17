@@ -460,8 +460,7 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
             ast::ExprMac(..) |
             ast::ExprClosure(..) |
             ast::ExprLit(..) |
-            ast::ExprPath(..) |
-            ast::ExprQPath(..) => {
+            ast::ExprPath(..) => {
                 self.straightline(expr, pred, None::<ast::Expr>.iter())
             }
         }
