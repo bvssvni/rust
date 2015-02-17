@@ -91,7 +91,6 @@ use middle::infer;
 use middle::mem_categorization as mc;
 use middle::mem_categorization::McResult;
 use middle::pat_util::{self, pat_id_map};
-use middle::privacy::{AllPublic, LastMod};
 use middle::region::{self, CodeExtent};
 use middle::subst::{self, Subst, Substs, VecPerParamSpace, ParamSpace, TypeSpace};
 use middle::traits;
@@ -3594,21 +3593,23 @@ fn check_expr_with_unifier<'a, 'tcx, F>(fcx: &FnCtxt<'a, 'tcx>,
               None
           };
 
-          // Helpers to avoid keeping the RefCell borrow for too long.
-          let get_def = || tcx.def_map.borrow().get(&id).cloned();
-          let get_partial_def = || tcx.partial_def_map.borrow().get(&id).cloned();
+          let path_res = if let Some(&d) = tcx.def_map.borrow().get(&id) {
+              d
+          } else {
+              tcx.sess.span_bug(expr.span,
+                                &format!("unbound path {}", expr.repr(tcx))[])
+          };
 
-          if let Some(def) = get_def() {
+          let mut def = path_res.base_def;
+          if path_res.depth == 0 {
               let (scheme, predicates) =
                   type_scheme_and_predicates_for_def(fcx, expr.span, def);
               instantiate_path(fcx, &path.segments,
                                scheme, &predicates,
-                               None, def, expr.span, id);
-          } else if let Some(partial) = get_partial_def() {
-              let mut def = partial.base_type;
+                               opt_self_ty, def, expr.span, id);
+          } else {
               let ty_segments = path.segments.init();
-              let ty_assoc_num = partial.extra_associated_types as usize;
-              let base_ty_end = ty_segments.len() - ty_assoc_num;
+              let base_ty_end = path.segments.len() - path_res.depth;
               let ty = astconv::finish_resolving_def_to_ty(fcx, fcx, expr.span,
                                                            PathParamMode::Optional,
                                                            &mut def,
@@ -3620,13 +3621,11 @@ fn check_expr_with_unifier<'a, 'tcx, F>(fcx: &FnCtxt<'a, 'tcx>,
               match method::resolve_ufcs(fcx, expr.span, method_name, ty, id) {
                   Ok((def, lp)) => {
                       // Write back the new resolution.
-                      tcx.def_map.borrow_mut().insert(id, def);
-
-                      if let LastMod(AllPublic) = lp {
-                          // Public method, don't change the last private entry.
-                      } else {
-                          tcx.last_private_map.borrow_mut().insert(id, lp);
-                      }
+                      tcx.def_map.borrow_mut().insert(id, def::PathResolution {
+                          base_def: def,
+                          last_private: path_res.last_private.or(lp),
+                          depth: 0
+                      });
 
                       let (scheme, predicates) =
                           type_scheme_and_predicates_for_def(fcx, expr.span, def);
@@ -3640,9 +3639,6 @@ fn check_expr_with_unifier<'a, 'tcx, F>(fcx: &FnCtxt<'a, 'tcx>,
                       fcx.write_error(id);
                   }
               }
-          } else {
-              tcx.sess.span_bug(expr.span,
-                                &format!("unbound path {}", expr.repr(tcx))[])
           }
 
           // We always require that the type provided as the value for
@@ -3878,7 +3874,7 @@ fn check_expr_with_unifier<'a, 'tcx, F>(fcx: &FnCtxt<'a, 'tcx>,
       }
       ast::ExprStruct(ref path, ref fields, ref base_expr) => {
         // Resolve the path.
-        let def = tcx.def_map.borrow().get(&id).cloned();
+        let def = tcx.def_map.borrow().get(&id).map(|d| d.full_def());
         let struct_id = match def {
             Some(def::DefVariant(enum_id, variant_id, true)) => {
                 check_struct_enum_variant(fcx, id, expr.span, enum_id,
@@ -5170,8 +5166,8 @@ pub fn may_break(cx: &ty::ctxt, id: ast::NodeId, b: &ast::Block) -> bool {
     (block_query(b, |e| {
         match e.node {
             ast::ExprBreak(Some(_)) => {
-                match cx.def_map.borrow().get(&e.id) {
-                    Some(&def::DefLabel(loop_id)) if id == loop_id => true,
+                match cx.def_map.borrow().get(&e.id).map(|d| d.full_def()) {
+                    Some(def::DefLabel(loop_id)) if id == loop_id => true,
                     _ => false,
                 }
             }
