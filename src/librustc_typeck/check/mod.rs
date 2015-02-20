@@ -91,6 +91,7 @@ use middle::infer;
 use middle::mem_categorization as mc;
 use middle::mem_categorization::McResult;
 use middle::pat_util::{self, pat_id_map};
+use middle::privacy::{AllPublic, LastMod};
 use middle::region::{self, CodeExtent};
 use middle::subst::{self, Subst, Substs, VecPerParamSpace, ParamSpace, TypeSpace};
 use middle::traits;
@@ -2687,7 +2688,7 @@ fn check_expr_with_unifier<'a, 'tcx, F>(fcx: &FnCtxt<'a, 'tcx>,
             }
             Err(error) => {
                 method::report_error(fcx, method_name.span, expr_t,
-                                     method_name.node.name, rcvr, error);
+                                     method_name.node.name, Some(rcvr), error);
                 fcx.write_error(expr.id);
                 fcx.tcx().types.err
             }
@@ -3594,8 +3595,8 @@ fn check_expr_with_unifier<'a, 'tcx, F>(fcx: &FnCtxt<'a, 'tcx>,
           };
 
           // Helpers to avoid keeping the RefCell borrow for too long.
-          let get_def = |&:| tcx.def_map.borrow().get(&id).cloned();
-          let get_partial_def = |&:| tcx.partial_def_map.borrow().get(&id).cloned();
+          let get_def = || tcx.def_map.borrow().get(&id).cloned();
+          let get_partial_def = || tcx.partial_def_map.borrow().get(&id).cloned();
 
           if let Some(def) = get_def() {
               let (scheme, predicates) =
@@ -3617,9 +3618,15 @@ fn check_expr_with_unifier<'a, 'tcx, F>(fcx: &FnCtxt<'a, 'tcx>,
               let method_segment = path.segments.last().unwrap();
               let method_name = method_segment.identifier.name;
               match method::resolve_ufcs(fcx, expr.span, method_name, ty, id) {
-                  Ok(def) => {
+                  Ok((def, lp)) => {
                       // Write back the new resolution.
                       tcx.def_map.borrow_mut().insert(id, def);
+
+                      if let LastMod(AllPublic) = lp {
+                          // Public method, don't change the last private entry.
+                      } else {
+                          tcx.last_private_map.borrow_mut().insert(id, lp);
+                      }
 
                       let (scheme, predicates) =
                           type_scheme_and_predicates_for_def(fcx, expr.span, def);
@@ -3629,7 +3636,7 @@ fn check_expr_with_unifier<'a, 'tcx, F>(fcx: &FnCtxt<'a, 'tcx>,
                   }
                   Err(error) => {
                       method::report_error(fcx, expr.span, ty,
-                                           method_name, expr, error);
+                                           method_name, None, error);
                       fcx.write_error(id);
                   }
               }
@@ -4838,9 +4845,9 @@ pub fn instantiate_path<'a, 'tcx>(fcx: &FnCtxt<'a, 'tcx>,
         }
     }
     if let Some(self_ty) = opt_self_ty {
-        // `<T as Trait>::foo` shouldn't have resolved to a `Self`-less item.
-        assert_eq!(type_defs.len(subst::SelfSpace), 1);
-        substs.types.push(subst::SelfSpace, self_ty);
+        if type_defs.len(subst::SelfSpace) == 1 {
+            substs.types.push(subst::SelfSpace, self_ty);
+        }
     }
 
     // Now we have to compare the types that the user *actually*
