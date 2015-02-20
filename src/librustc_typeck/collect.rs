@@ -735,6 +735,7 @@ fn convert_item(ccx: &CollectCtxt, it: &ast::Item) {
                 astconv::instantiate_trait_ref(ccx,
                                                &ExplicitRscope,
                                                trait_ref,
+                                               Some(it.id),
                                                Some(selfty),
                                                None);
             }
@@ -1674,20 +1675,15 @@ fn compute_object_lifetime_default<'a,'tcx>(ccx: &CollectCtxt<'a,'tcx>,
                 index: u32)
                 -> bool
     {
-        match ast_ty.node {
-            ast::TyPath(_, id) => {
-                match ccx.tcx.def_map.borrow()[id] {
-                    def::DefTyParam(s, i, _, _) => {
-                        space == s && index == i
-                    }
-                    _ => {
-                        false
-                    }
-                }
-            }
-            _ => {
+        if let ast::TyPath(None, _) = ast_ty.node {
+            let path_res = ccx.tcx.def_map.borrow()[ast_ty.id];
+            if let def::DefTyParam(s, i, _, _) = path_res.base_def {
+                path_res.depth == 0 && space == s && index == i
+            } else {
                 false
             }
+        } else {
+            false
         }
     }
 }

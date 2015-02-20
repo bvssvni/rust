@@ -1344,8 +1344,6 @@ pub enum Type {
         typarams: Option<Vec<TyParamBound>>,
         did: ast::DefId,
     },
-    // I have no idea how to usefully use this.
-    TyParamBinder(ast::NodeId),
     /// For parameterized types, so the consumer of the JSON don't go
     /// looking for types which don't exist anywhere.
     Generic(String),
@@ -1496,8 +1494,17 @@ impl Clean<Type> for ast::Ty {
             TyFixedLengthVec(ref ty, ref e) => FixedVector(box ty.clean(cx),
                                                            e.span.to_src(cx)),
             TyTup(ref tys) => Tuple(tys.clean(cx)),
-            TyPath(ref p, id) => {
-                resolve_type(cx, p.clean(cx), id)
+            TyPath(None, ref p) => {
+                resolve_type(cx, p.clean(cx), self.id)
+            }
+            TyPath(Some(ref qself), ref p) => {
+                let mut trait_path = p.clone();
+                trait_path.segments.pop();
+                Type::QPath {
+                    name: p.segments.last().unwrap().identifier.clean(cx),
+                    self_type: box qself.ty.clean(cx),
+                    trait_: box resolve_type(cx, trait_path.clean(cx), self.id)
+                }
             }
             TyObjectSum(ref lhs, ref bounds) => {
                 let lhs_ty = lhs.clean(cx);
@@ -1512,7 +1519,6 @@ impl Clean<Type> for ast::Ty {
             }
             TyBareFn(ref barefn) => BareFunction(box barefn.clean(cx)),
             TyParen(ref ty) => ty.clean(cx),
-            TyQPath(ref qp) => qp.clean(cx),
             TyPolyTraitRef(ref bounds) => {
                 PolyTraitRef(bounds.clean(cx))
             },
@@ -1621,16 +1627,6 @@ impl<'tcx> Clean<Type> for ty::Ty<'tcx> {
             ty::ty_infer(..) => panic!("ty_infer"),
             ty::ty_open(..) => panic!("ty_open"),
             ty::ty_err => panic!("ty_err"),
-        }
-    }
-}
-
-impl Clean<Type> for ast::QPath {
-    fn clean(&self, cx: &DocContext) -> Type {
-        Type::QPath {
-            name: self.item_path.identifier.clean(cx),
-            self_type: box self.self_type.clean(cx),
-            trait_: box self.trait_ref.clean(cx)
         }
     }
 }
@@ -2393,7 +2389,7 @@ fn resolve_type(cx: &DocContext,
     };
     debug!("searching for {} in defmap", id);
     let def = match tcx.def_map.borrow().get(&id) {
-        Some(&k) => k,
+        Some(k) => k.full_def(),
         None => panic!("unresolved id not in defmap")
     };
 
@@ -2419,7 +2415,6 @@ fn resolve_type(cx: &DocContext,
             ast::TyFloat(ast::TyF64) => return Primitive(F64),
         },
         def::DefTyParam(_, _, _, n) => return Generic(token::get_name(n).to_string()),
-        def::DefTyParamBinder(i) => return TyParamBinder(i),
         _ => {}
     };
     let did = register_def(&*cx, def);
@@ -2460,7 +2455,7 @@ fn resolve_use_source(cx: &DocContext, path: Path, id: ast::NodeId) -> ImportSou
 
 fn resolve_def(cx: &DocContext, id: ast::NodeId) -> Option<ast::DefId> {
     cx.tcx_opt().and_then(|tcx| {
-        tcx.def_map.borrow().get(&id).map(|&def| register_def(cx, def))
+        tcx.def_map.borrow().get(&id).map(|d| register_def(cx, d.full_def()))
     })
 }
 

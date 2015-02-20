@@ -710,7 +710,7 @@ pub struct ctxt<'tcx> {
 
     pub impl_trait_cache: RefCell<DefIdMap<Option<Rc<ty::TraitRef<'tcx>>>>>,
 
-    pub trait_refs: RefCell<NodeMap<Rc<TraitRef<'tcx>>>>,
+    pub impl_trait_refs: RefCell<NodeMap<Rc<TraitRef<'tcx>>>>,
     pub trait_defs: RefCell<DefIdMap<Rc<TraitDef<'tcx>>>>,
 
     /// Maps from the def-id of an item (trait/struct/enum/fn) to its
@@ -2441,7 +2441,7 @@ impl<'tcx> CommonTypes<'tcx> {
 
 pub fn mk_ctxt<'tcx>(s: Session,
                      arenas: &'tcx CtxtArenas<'tcx>,
-                     dm: DefMap,
+                     def_map: DefMap,
                      named_region_map: resolve_lifetime::NamedRegionMap,
                      map: ast_map::Map<'tcx>,
                      freevars: RefCell<FreevarMap>,
@@ -2463,11 +2463,11 @@ pub fn mk_ctxt<'tcx>(s: Session,
         item_variance_map: RefCell::new(DefIdMap()),
         variance_computed: Cell::new(false),
         sess: s,
-        def_map: dm,
+        def_map: def_map,
         region_maps: region_maps,
         node_types: RefCell::new(FnvHashMap()),
         item_substs: RefCell::new(NodeMap()),
-        trait_refs: RefCell::new(NodeMap()),
+        impl_trait_refs: RefCell::new(NodeMap()),
         trait_defs: RefCell::new(DefIdMap()),
         predicates: RefCell::new(DefIdMap()),
         object_cast_map: RefCell::new(NodeMap()),
@@ -4216,12 +4216,12 @@ pub fn named_element_ty<'tcx>(cx: &ctxt<'tcx>,
     }
 }
 
-pub fn node_id_to_trait_ref<'tcx>(cx: &ctxt<'tcx>, id: ast::NodeId)
+pub fn impl_id_to_trait_ref<'tcx>(cx: &ctxt<'tcx>, id: ast::NodeId)
                                   -> Rc<ty::TraitRef<'tcx>> {
-    match cx.trait_refs.borrow().get(&id) {
+    match cx.impl_trait_refs.borrow().get(&id) {
         Some(ty) => ty.clone(),
         None => cx.sess.bug(
-            &format!("node_id_to_trait_ref: no trait ref for node `{}`",
+            &format!("impl_id_to_trait_ref: no trait ref for impl `{}`",
                     cx.map.node_to_string(id))[])
     }
 }
@@ -4544,7 +4544,7 @@ pub fn unsize_ty<'tcx>(cx: &ctxt<'tcx>,
 
 pub fn resolve_expr(tcx: &ctxt, expr: &ast::Expr) -> def::Def {
     match tcx.def_map.borrow().get(&expr.id) {
-        Some(&def) => def,
+        Some(def) => def.full_def(),
         None => {
             tcx.sess.span_bug(expr.span, &format!(
                 "no def-map entry for expr {}", expr.id)[]);
@@ -4592,7 +4592,7 @@ pub fn expr_kind(tcx: &ctxt, expr: &ast::Expr) -> ExprKind {
     }
 
     match expr.node {
-        ast::ExprPath(_) | ast::ExprQPath(_) => {
+        ast::ExprPath(..) => {
             match resolve_expr(tcx, expr) {
                 def::DefVariant(tid, vid, _) => {
                     let variant_info = enum_variant_with_id(tcx, tid, vid);
@@ -4623,7 +4623,7 @@ pub fn expr_kind(tcx: &ctxt, expr: &ast::Expr) -> ExprKind {
                 def::DefFn(_, true) => RvalueDpsExpr,
 
                 // Fn pointers are just scalar values.
-                def::DefFn(..) | def::DefStaticMethod(..) | def::DefMethod(..) => RvalueDatumExpr,
+                def::DefFn(..) | def::DefMethod(..) => RvalueDatumExpr,
 
                 // Note: there is actually a good case to be made that
                 // DefArg's, particularly those of immediate type, ought to
@@ -4727,11 +4727,10 @@ pub fn expr_kind(tcx: &ctxt, expr: &ast::Expr) -> ExprKind {
 
         ast::ExprBox(Some(ref place), _) => {
             // Special case `Box<T>` for now:
-            let definition = match tcx.def_map.borrow().get(&place.id) {
-                Some(&def) => def,
+            let def_id = match tcx.def_map.borrow().get(&place.id) {
+                Some(def) => def.def_id(),
                 None => panic!("no def for place"),
             };
-            let def_id = definition.def_id();
             if tcx.lang_items.exchange_heap() == Some(def_id) {
                 RvalueDatumExpr
             } else {
@@ -5159,22 +5158,16 @@ pub fn impl_trait_ref<'tcx>(cx: &ctxt<'tcx>, id: ast::DefId)
     memoized(&cx.impl_trait_cache, id, |id: ast::DefId| {
         if id.krate == ast::LOCAL_CRATE {
             debug!("(impl_trait_ref) searching for trait impl {:?}", id);
-            match cx.map.find(id.node) {
-                Some(ast_map::NodeItem(item)) => {
-                    match item.node {
-                        ast::ItemImpl(_, _, _, ref opt_trait, _, _) => {
-                            match opt_trait {
-                                &Some(ref t) => {
-                                    let trait_ref = ty::node_id_to_trait_ref(cx, t.ref_id);
-                                    Some(trait_ref)
-                                }
-                                &None => None
-                            }
-                        }
-                        _ => None
-                    }
+            if let Some(ast_map::NodeItem(item)) = cx.map.find(id.node) {
+                if let ast::ItemImpl(_, _, _, ref opt_trait, _, _) = item.node {
+                    opt_trait.as_ref().map(|_| {
+                        ty::impl_id_to_trait_ref(cx, id.node)
+                    })
+                } else {
+                    None
                 }
-                _ => None
+            } else {
+                None
             }
         } else {
             csearch::get_impl_trait(cx, id)
@@ -5183,10 +5176,7 @@ pub fn impl_trait_ref<'tcx>(cx: &ctxt<'tcx>, id: ast::DefId)
 }
 
 pub fn trait_ref_to_def_id(tcx: &ctxt, tr: &ast::TraitRef) -> ast::DefId {
-    let def = *tcx.def_map.borrow()
-                     .get(&tr.ref_id)
-                     .expect("no def-map entry for trait");
-    def.def_id()
+    tcx.def_map.borrow().get(&tr.ref_id).expect("no def-map entry for trait").def_id()
 }
 
 pub fn try_add_builtin_trait(
@@ -5888,7 +5878,7 @@ pub fn eval_repeat_count(tcx: &ctxt, count_expr: &ast::Expr) -> uint {
         }
         Err(_) => {
             let found = match count_expr.node {
-                ast::ExprPath(ast::Path {
+                ast::ExprPath(None, ast::Path {
                     global: false,
                     ref segments,
                     ..

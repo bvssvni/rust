@@ -1217,7 +1217,7 @@ fn encode_info_for_item(ecx: &EncodeContext,
         encode_unsafety(rbml_w, unsafety);
         encode_polarity(rbml_w, polarity);
         match ty.node {
-            ast::TyPath(ref path, _) if path.segments.len() == 1 => {
+            ast::TyPath(None, ref path) if path.segments.len() == 1 => {
                 let ident = path.segments.last().unwrap().identifier;
                 encode_impl_type_basename(rbml_w, ident);
             }
@@ -1237,9 +1237,8 @@ fn encode_info_for_item(ecx: &EncodeContext,
             }
             rbml_w.end_tag();
         }
-        if let Some(ref ast_trait_ref) = *opt_trait {
-            let trait_ref = ty::node_id_to_trait_ref(
-                tcx, ast_trait_ref.ref_id);
+        if opt_trait.is_some() {
+            let trait_ref = ty::impl_id_to_trait_ref(tcx, item.id);
             encode_trait_ref(rbml_w, ecx, &*trait_ref, tag_item_trait_ref);
         }
         encode_path(rbml_w, path.clone());
@@ -1909,9 +1908,7 @@ struct ImplVisitor<'a, 'b:'a, 'c:'a, 'tcx:'b> {
 impl<'a, 'b, 'c, 'tcx, 'v> Visitor<'v> for ImplVisitor<'a, 'b, 'c, 'tcx> {
     fn visit_item(&mut self, item: &ast::Item) {
         if let ast::ItemImpl(_, _, _, Some(ref trait_ref), _, _) = item.node {
-            let def_map = &self.ecx.tcx.def_map;
-            let trait_def = def_map.borrow()[trait_ref.ref_id].clone();
-            let def_id = trait_def.def_id();
+            let def_id = self.ecx.tcx.def_map.borrow()[trait_ref.ref_id].def_id();
 
             // Load eagerly if this is an implementation of the Drop trait
             // or if the trait is not defined in this crate.
